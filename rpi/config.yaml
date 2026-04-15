@@ -1,0 +1,37 @@
+# FridgeGuard — Configuration
+
+roommates:
+  - name: Satvik
+    ble_uuid: "ff01"
+    notify_channel: discord
+    discord_webhook: "https://discord.com/api/webhooks/YOUR_ALEX_WEBHOOK"
+
+  - name: Pranav
+    ble_uuid: "ff02"
+    notify_channel: discord
+    discord_webhook: "https://discord.com/api/webhooks/YOUR_BLAKE_WEBHOOK"
+
+  - name: Ayushi
+    ble_uuid: "ff03"
+    notify_channel: discord
+    discord_webhook: "https://discord.com/api/webhooks/YOUR_CASEY_WEBHOOK"
+
+camera:
+  brightness_threshold: 40
+  black_frame_streak: 5
+  open_settle_delay: 0.0
+  after_lookback_sec: 0.2
+
+ble:
+  rssi_floor: -95
+
+temperature:
+  alert_threshold_c: 8
+  alert_sustained_min: 5
+
+groq:
+  api_key: "YOUR_GROQ_API_KEY"
+  model: "meta-llama/llama-4-scout-17b-16e-instruct"
+
+discord:
+  general_webhook: "https://discord.com/api/webhooks/YOUR_GENERAL_WEBHOOK"

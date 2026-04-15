@@ -1,0 +1,182 @@
+"""
+FridgeGuard — SQLite database layer.
+
+Tables:
+  inventory  — items currently in the fridge (name, owner, timestamp)
+  events     — log of all fridge interactions
+  temp_log   — temperature readings from DHT11
+"""
+
+import sqlite3
+from datetime import datetime, timedelta
+from typing import Optional
+
+
+class DB:
+    def __init__(self, db_path: str = "fridgeguard.db"):
+        self.db_path = db_path
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        self._create_tables()
+
+    def _create_tables(self):
+        self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS inventory (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                item_name   TEXT NOT NULL,
+                owner       TEXT NOT NULL,
+                added_at    TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS events (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp   TEXT NOT NULL,
+                actor       TEXT,
+                action      TEXT NOT NULL,
+                item_name   TEXT,
+                item_owner  TEXT,
+                scenario    TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS temp_log (
+                timestamp   TEXT PRIMARY KEY,
+                temp_c      REAL,
+                humidity    REAL
+            );
+        """)
+        self.conn.commit()
+
+    # ── Inventory ────────────────────────────────────────────
+
+    def add_item(self, item_name: str, owner: str) -> int:
+        """Add an item to the fridge. Returns the row ID."""
+        cur = self.conn.execute(
+            "INSERT INTO inventory (item_name, owner, added_at) VALUES (?, ?, ?)",
+            (item_name.lower(), owner, datetime.now().isoformat()),
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def remove_item(self, item_name: str) -> Optional[dict]:
+        """
+        Remove an item from inventory by name (fuzzy: case-insensitive).
+        Returns the removed item's info (name, owner, added_at) or None.
+        """
+        row = self.conn.execute(
+            "SELECT * FROM inventory WHERE LOWER(item_name) = LOWER(?) ORDER BY added_at DESC LIMIT 1",
+            (item_name,),
+        ).fetchone()
+
+        if row:
+            self.conn.execute("DELETE FROM inventory WHERE id = ?", (row["id"],))
+            self.conn.commit()
+            return dict(row)
+        return None
+
+    def find_item(self, item_name: str) -> Optional[dict]:
+        """
+        Look up an item by name using fuzzy word-overlap matching.
+        First tries exact match, then falls back to word overlap.
+        Requires at least 2 shared words to avoid false positives.
+        """
+        # Try exact match first
+        row = self.conn.execute(
+            "SELECT * FROM inventory WHERE LOWER(item_name) = LOWER(?) "
+            "ORDER BY added_at DESC LIMIT 1",
+            (item_name,),
+        ).fetchone()
+        if row:
+            return dict(row)
+
+        # Fuzzy fallback — word overlap
+        rows = self.conn.execute(
+            "SELECT * FROM inventory ORDER BY added_at DESC"
+        ).fetchall()
+
+        if not rows:
+            return None
+
+        query_words = set(item_name.lower().split())
+        best_row    = None
+        best_score  = 0
+
+        for row in rows:
+            stored_words = set(row["item_name"].lower().split())
+            overlap      = len(query_words & stored_words)
+            if overlap > best_score and overlap >= 2:
+                best_score = overlap
+                best_row   = row
+
+        if best_row:
+            print(f"[DB] Fuzzy matched '{item_name}' → '{best_row['item_name']}' "
+                f"(score={best_score})")
+            return dict(best_row)
+
+        return None
+
+    def get_inventory(self) -> list[dict]:
+        """Return all items currently in the fridge."""
+        rows = self.conn.execute(
+            "SELECT * FROM inventory ORDER BY added_at DESC"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_inventory_by_owner(self, owner: str) -> list[dict]:
+        """Return all items owned by a specific roommate."""
+        rows = self.conn.execute(
+            "SELECT * FROM inventory WHERE LOWER(owner) = LOWER(?) ORDER BY added_at DESC",
+            (owner,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def clear_inventory(self):
+        """Wipe all inventory (for testing/reset)."""
+        self.conn.execute("DELETE FROM inventory")
+        self.conn.commit()
+
+    # ── Event logging ────────────────────────────────────────
+
+    def log_event(
+        self,
+        actor: Optional[str],
+        action: str,
+        item_name: Optional[str] = None,
+        item_owner: Optional[str] = None,
+        scenario: Optional[str] = None,
+    ):
+        """Record a fridge interaction event."""
+        self.conn.execute(
+            """INSERT INTO events (timestamp, actor, action, item_name, item_owner, scenario)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (datetime.now().isoformat(), actor or "guest", action,
+             item_name, item_owner, scenario),
+        )
+        self.conn.commit()
+
+    def get_recent_events(self, limit: int = 20) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    # ── Temperature logging ──────────────────────────────────
+
+    def log_temp(self, temp_c: float, humidity: float):
+        self.conn.execute(
+            "INSERT OR REPLACE INTO temp_log (timestamp, temp_c, humidity) VALUES (?, ?, ?)",
+            (datetime.now().isoformat(), temp_c, humidity),
+        )
+        self.conn.commit()
+
+    def get_recent_temps(self, minutes: int = 10) -> list[dict]:
+        cutoff = (datetime.now() - timedelta(minutes=minutes)).isoformat()
+        rows = self.conn.execute(
+            "SELECT * FROM temp_log WHERE timestamp > ? ORDER BY timestamp DESC",
+            (cutoff,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    # ── Cleanup ──────────────────────────────────────────────
+
+    def close(self):
+        self.conn.close()
