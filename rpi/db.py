@@ -12,10 +12,22 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 
+# Words that are unreliable for matching — either filler or color words
+# that Groq frequently gets wrong due to fridge lighting conditions.
+_STOPWORDS = {
+    # filler
+    "and", "or", "a", "the", "with", "of", "in", "on",
+    # colors — intentionally excluded so color mismatches don't block matching
+    "red", "orange", "yellow", "green", "blue", "purple", "pink",
+    "black", "white", "grey", "gray", "silver", "gold", "brown",
+    "dark", "light", "bright",
+}
+
+
 class DB:
     def __init__(self, db_path: str = "fridgeguard.db"):
         self.db_path = db_path
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.conn    = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self._create_tables()
 
@@ -40,7 +52,7 @@ class DB:
 
             CREATE TABLE IF NOT EXISTS temp_log (
                 timestamp   TEXT PRIMARY KEY,
-                temp_c      REAL,
+                temp_f      REAL,
                 humidity    REAL
             );
         """)
@@ -59,57 +71,64 @@ class DB:
 
     def remove_item(self, item_name: str) -> Optional[dict]:
         """
-        Remove an item from inventory by name (fuzzy: case-insensitive).
-        Returns the removed item's info (name, owner, added_at) or None.
+        Remove an item from inventory by name.
+        Uses the same fuzzy matching as find_item to locate the row.
+        Returns the removed item's info or None.
         """
-        row = self.conn.execute(
-            "SELECT * FROM inventory WHERE LOWER(item_name) = LOWER(?) ORDER BY added_at DESC LIMIT 1",
-            (item_name,),
-        ).fetchone()
-
-        if row:
-            self.conn.execute("DELETE FROM inventory WHERE id = ?", (row["id"],))
+        record = self.find_item(item_name)
+        if record:
+            self.conn.execute(
+                "DELETE FROM inventory WHERE id = ?", (record["id"],)
+            )
             self.conn.commit()
-            return dict(row)
+            return record
         return None
 
     def find_item(self, item_name: str) -> Optional[dict]:
         """
-        Look up an item by name using fuzzy word-overlap matching.
-        First tries exact match, then falls back to word overlap.
-        Requires at least 2 shared words to avoid false positives.
+        Look up an item by name.
+
+        Matching strategy:
+          1. Exact match (case-insensitive) — always wins if found.
+          2. Structural word overlap — matches on shape/size/container
+             words only, deliberately excluding color words and filler.
+             This handles Groq describing the same object with different
+             colors due to lighting (e.g. "blue and yellow can" vs
+             "blue and green can" both match on "cylindrical" + "can").
+
+        Requires at least 2 structural word matches to avoid false positives.
         """
-        # Try exact match first
+        # 1. Exact match
         row = self.conn.execute(
-            "SELECT * FROM inventory WHERE LOWER(item_name) = LOWER(?) "
+            "SELECT * FROM inventory "
+            "WHERE LOWER(item_name) = LOWER(?) "
             "ORDER BY added_at DESC LIMIT 1",
             (item_name,),
         ).fetchone()
         if row:
             return dict(row)
 
-        # Fuzzy fallback — word overlap
+        # 2. Structural fuzzy match (colors and filler excluded)
         rows = self.conn.execute(
             "SELECT * FROM inventory ORDER BY added_at DESC"
         ).fetchall()
-
         if not rows:
             return None
 
-        query_words = set(item_name.lower().split())
+        query_words = set(item_name.lower().split()) - _STOPWORDS
         best_row    = None
         best_score  = 0
 
         for row in rows:
-            stored_words = set(row["item_name"].lower().split())
+            stored_words = set(row["item_name"].lower().split()) - _STOPWORDS
             overlap      = len(query_words & stored_words)
             if overlap > best_score and overlap >= 2:
                 best_score = overlap
                 best_row   = row
 
         if best_row:
-            print(f"[DB] Fuzzy matched '{item_name}' → '{best_row['item_name']}' "
-                f"(score={best_score})")
+            print(f"[DB] Fuzzy matched '{item_name}' "
+                  f"→ '{best_row['item_name']}' (score={best_score})")
             return dict(best_row)
 
         return None
@@ -124,7 +143,8 @@ class DB:
     def get_inventory_by_owner(self, owner: str) -> list[dict]:
         """Return all items owned by a specific roommate."""
         rows = self.conn.execute(
-            "SELECT * FROM inventory WHERE LOWER(owner) = LOWER(?) ORDER BY added_at DESC",
+            "SELECT * FROM inventory "
+            "WHERE LOWER(owner) = LOWER(?) ORDER BY added_at DESC",
             (owner,),
         ).fetchall()
         return [dict(row) for row in rows]
@@ -138,15 +158,15 @@ class DB:
 
     def log_event(
         self,
-        actor: Optional[str],
-        action: str,
-        item_name: Optional[str] = None,
+        actor:      Optional[str],
+        action:     str,
+        item_name:  Optional[str] = None,
         item_owner: Optional[str] = None,
-        scenario: Optional[str] = None,
+        scenario:   Optional[str] = None,
     ):
-        """Record a fridge interaction event."""
         self.conn.execute(
-            """INSERT INTO events (timestamp, actor, action, item_name, item_owner, scenario)
+            """INSERT INTO events
+               (timestamp, actor, action, item_name, item_owner, scenario)
                VALUES (?, ?, ?, ?, ?, ?)""",
             (datetime.now().isoformat(), actor or "guest", action,
              item_name, item_owner, scenario),
@@ -161,17 +181,19 @@ class DB:
 
     # ── Temperature logging ──────────────────────────────────
 
-    def log_temp(self, temp_c: float, humidity: float):
+    def log_temp(self, temp_f: float, humidity: float):
         self.conn.execute(
-            "INSERT OR REPLACE INTO temp_log (timestamp, temp_c, humidity) VALUES (?, ?, ?)",
-            (datetime.now().isoformat(), temp_c, humidity),
+            "INSERT OR REPLACE INTO temp_log "
+            "(timestamp, temp_f, humidity) VALUES (?, ?, ?)",
+            (datetime.now().isoformat(), temp_f, humidity),
         )
         self.conn.commit()
 
     def get_recent_temps(self, minutes: int = 10) -> list[dict]:
         cutoff = (datetime.now() - timedelta(minutes=minutes)).isoformat()
-        rows = self.conn.execute(
-            "SELECT * FROM temp_log WHERE timestamp > ? ORDER BY timestamp DESC",
+        rows   = self.conn.execute(
+            "SELECT * FROM temp_log "
+            "WHERE timestamp > ? ORDER BY timestamp DESC",
             (cutoff,),
         ).fetchall()
         return [dict(row) for row in rows]

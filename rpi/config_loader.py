@@ -1,7 +1,5 @@
 """
 FridgeGuard — Config loader.
-
-Parses config.yaml into typed dataclass objects.
 """
 
 from dataclasses import dataclass, field
@@ -15,16 +13,15 @@ import yaml
 class RoommateConfig:
     name:            str
     ble_uuid:        str
-    notify_channel:  str
-    discord_webhook: str
+    private_webhook: str
 
 
 @dataclass
 class CameraConfig:
     brightness_threshold: int
     black_frame_streak:   int
-    open_settle_delay:    float
     after_lookback_sec:   float
+    calibration_settle:   float
 
 
 @dataclass
@@ -34,7 +31,7 @@ class BLEConfig:
 
 @dataclass
 class TempConfig:
-    alert_threshold_c:   float
+    alert_threshold_f:   float
     alert_sustained_min: int
 
 
@@ -46,7 +43,8 @@ class GroqConfig:
 
 @dataclass
 class DiscordConfig:
-    general_webhook: str
+    status_webhook:  str   # debug dump — all events
+    general_webhook: str   # visible to all roommates
 
 
 @dataclass
@@ -85,8 +83,7 @@ def load_config(path: str = "config.yaml") -> Config:
         RoommateConfig(
             name=r["name"],
             ble_uuid=r["ble_uuid"].lower(),
-            notify_channel=r["notify_channel"],
-            discord_webhook=r["discord_webhook"],
+            private_webhook=r["private_webhook"],
         )
         for r in raw["roommates"]
     ]
@@ -97,14 +94,14 @@ def load_config(path: str = "config.yaml") -> Config:
         camera=CameraConfig(
             brightness_threshold = cam["brightness_threshold"],
             black_frame_streak   = cam["black_frame_streak"],
-            open_settle_delay    = cam["open_settle_delay"],
             after_lookback_sec   = cam["after_lookback_sec"],
+            calibration_settle   = cam["calibration_settle"],
         ),
         ble=BLEConfig(
             rssi_floor=raw["ble"]["rssi_floor"],
         ),
         temperature=TempConfig(
-            alert_threshold_c   = raw["temperature"]["alert_threshold_c"],
+            alert_threshold_f   = raw["temperature"]["alert_threshold_f"],
             alert_sustained_min = raw["temperature"]["alert_sustained_min"],
         ),
         groq=GroqConfig(
@@ -112,6 +109,7 @@ def load_config(path: str = "config.yaml") -> Config:
             model   = raw["groq"]["model"],
         ),
         discord=DiscordConfig(
-            general_webhook=raw["discord"]["general_webhook"],
+            status_webhook  = raw["discord"]["status_webhook"],
+            general_webhook = raw["discord"]["general_webhook"],
         ),
     )

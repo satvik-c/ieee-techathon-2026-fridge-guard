@@ -38,7 +38,7 @@ class Camera:
         self,
         brightness_threshold: int = 40,
         black_frame_streak: int = 5,
-        after_lookback_sec: float = 0.2,
+        after_lookback_sec: float = 0.1,
         calibration_settle: float = 3.0,
         on_open:  Optional[Callable] = None,
         on_close: Optional[Callable] = None,
@@ -58,6 +58,7 @@ class Camera:
         self.calibration_settle   = calibration_settle
         self._on_open             = on_open
         self._on_close            = on_close
+        self.calib_status = "WAITING"
 
         self.state: FridgeState                 = FridgeState.CLOSED
         self.before_frame: Optional[np.ndarray] = None
@@ -72,7 +73,7 @@ class Camera:
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
-    def _init_camera(self):
+    async def _init_camera(self):
         self._cam = Picamera2()
         cfg = self._cam.create_preview_configuration(
             main={"size": (1920, 1080), "format": "RGB888"},
@@ -82,7 +83,7 @@ class Camera:
 
         # Let AEC/AWB do an initial settle in the dark.
         # We don't lock here — calibration happens on first open.
-        time.sleep(2)
+        await asyncio.sleep(2)
 
         print(f"[Camera] Pi Camera Module 3 Wide ready — awaiting calibration "
               f"(threshold={self.brightness_threshold}, "
@@ -90,20 +91,21 @@ class Camera:
               f"lookback={self.after_lookback_sec}s)")
         print(f"[Camera] Open the fridge door once to calibrate.")
 
-    def _calibrate(self):
+    async def _calibrate(self):
         """
         Called during the first door open.
         Unlocks AEC/AWB, waits for them to converge on the lit fridge interior,
         then locks the settings permanently.
         """
+        self.calib_status = "CALIBRATING"
         print(f"[Camera] Calibrating — letting AEC/AWB converge on lit interior "
               f"({self.calibration_settle}s)...")
 
-        # Unlock so the sensor can adapt to the bright lit interior
+        # 1. Force Auto-Exposure and Auto-White Balance ON so it adapts to the fridge light
         self._cam.set_controls({"AeEnable": True, "AwbEnable": True})
-        time.sleep(self.calibration_settle)
+        await asyncio.sleep(self.calibration_settle)
 
-        # Read the converged values and lock them permanently
+        # 2. Read the perfectly converged values
         with self._cam.captured_request() as req:
             meta = req.get_metadata()
 
@@ -111,18 +113,21 @@ class Camera:
         exposure  = meta.get("ExposureTime", None)
         awb_gains = meta.get("ColourGains", None)
 
+        # 3. Freeze the camera settings permanently!
         controls = {"AeEnable": False, "AwbEnable": False}
         if gain      is not None: controls["AnalogueGain"] = gain
         if exposure  is not None: controls["ExposureTime"] = exposure
         if awb_gains is not None: controls["ColourGains"]  = awb_gains
 
         self._cam.set_controls(controls)
-        time.sleep(0.3)  # let lock take effect
+        await asyncio.sleep(0.3)
 
         self._calibrated = True
         print(f"[Camera] Calibration complete — AEC/AWB locked "
               f"(gain={gain:.2f}, exposure={exposure}us, awb={awb_gains})")
         print(f"[Camera] Close the fridge. System is ready.")
+
+        self.calib_status = "SUCCESS" # Move to the next stage
 
     def release(self):
         if self._cam:
@@ -201,7 +206,7 @@ class Camera:
     # ── Main async loop ───────────────────────────────────────────────────────
 
     async def monitor_loop(self, poll_interval: float = 0.2):
-        self._init_camera()
+        await self._init_camera()
         try:
             while True:
                 frame = self.capture()
@@ -211,7 +216,7 @@ class Camera:
                     # ── First open: calibration cycle ─────────────────────────
                     if event == "opened" and not self._calibrated:
                         # Calibrate on this open — do not fire on_open/on_close
-                        self._calibrate()
+                        await self._calibrate()
                         # Wait for door to close before resuming normal operation
                         print("[Camera] Waiting for door to close after calibration...")
                         while True:
@@ -231,6 +236,7 @@ class Camera:
                                 self._dark_count = 0
                                 print("[Camera] Door closed — calibration complete. "
                                       "System is live.")
+                                self.calib_status = "COMPLETE"
                                 break
 
                     # ── Normal open (post-calibration) ────────────────────────

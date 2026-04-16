@@ -48,7 +48,7 @@ class InventoryItem:
 class TempReading:
     """A single temperature/humidity reading from the ESP32."""
     timestamp: datetime
-    temp_c: float
+    temp_f: float
     humidity: float
 
 

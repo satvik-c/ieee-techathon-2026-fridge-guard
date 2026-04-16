@@ -6,7 +6,7 @@ into async queues for downstream consumers.
 
 ESP32 serial protocol (one JSON object per line):
   BLE scan:   {"type":"ble","ts":12345,"devices":[{"uuid":"ff01","rssi":-42}]}
-  Temp read:  {"type":"temp","temp_c":6.0,"humidity":45,"ts":12345}
+  Temp read:  {"type":"temp","temp_f":6.0,"humidity":45,"ts":12345}
 
 The "uuid" field is a 16-bit service UUID (hex string, lowercase)
 that each roommate broadcasts via nRF Connect.
@@ -21,6 +21,7 @@ import serial
 import serial.tools.list_ports
 
 from models import BLEDevice, BLEScan, TempReading
+from oled_display import FridgeDisplay
 
 
 class SerialReader:
@@ -31,6 +32,7 @@ class SerialReader:
         self.temp_queue: asyncio.Queue[TempReading] = asyncio.Queue()
         self._serial: Optional[serial.Serial] = None
         self._running = False
+        self.display = FridgeDisplay()
 
     def _open(self):
         self._serial = serial.Serial(port=self.port, baudrate=self.baud, timeout=1)
@@ -56,14 +58,26 @@ class SerialReader:
                 for d in msg.get("devices", [])
             ]
             self.ble_queue.put_nowait(BLEScan(timestamp=ts, devices=devices))
+
+            if devices:
+                # Show the first detected roommate's UUID on the OLED
+                self.display.update_status(
+                    temp_f=None, # Keep existing temp if your update_status allows
+                    humidity=None, 
+                    roommate=devices[0].uuid
+                )
+            
             return "ble"
 
         elif msg_type == "temp":
+            t_f = msg.get("temp_f", 0.0)
+            hum = msg.get("humidity", 0.0)
             self.temp_queue.put_nowait(TempReading(
                 timestamp=ts,
-                temp_c=msg.get("temp_c", 0.0),
+                temp_f=msg.get("temp_f", 0.0),
                 humidity=msg.get("humidity", 0.0),
             ))
+            self.display.update_status(temp_f=t_f, humidity=hum)
             return "temp"
 
         return None

@@ -1,9 +1,9 @@
 """
 FridgeGuard — Analyzer module (Groq vision, single pass).
 
-Accepts current inventory as context so Groq uses exact existing
-descriptions when reporting removals, ensuring consistent naming
-across calls and reliable DB lookups.
+Injects current inventory into prompt so Groq uses exact stored
+descriptions for removals, and includes item count so Groq doesn't
+hallucinate duplicates.
 """
 
 import base64
@@ -29,6 +29,13 @@ CONTEXT:
 - BACKGROUND LIGHT does not move or change between photos — if something near it disappeared, it was a real object.
 - Objects may shift slightly in position between photos — this is irrelevant. Only care about objects that completely disappear or newly appear.
 - PARTIALLY OBSCURED OBJECTS: count every distinct object even if only partially visible.
+
+CRITICAL RULES FOR EDGE CASES (OBJECT PERMANENCE & STRICT MATH):
+- CUTOFFS & OCCLUSIONS ARE EXPECTED: The internal space is extremely tight (roughly 28x40x38 cm). Because the camera is wide-angle and close to the items, objects WILL frequently be cut in half by the edge of the frame or tightly packed together.
+- THE 80% SIMILARITY RULE: If you see an object that looks 80% similar to an item right next to it, but it is slightly cut off, distorted by the lens edge, or partially obscured, YOU MUST COUNT IT AS A SEPARATE, ADDITIONAL ITEM.
+- THE HIDDEN ITEM FALLBACK: If a large item appears in Photo 2 and blocks the view, ASSUME the items previously behind it are still there.
+- NO SUMMARIZATION: NEVER group identical items together. NEVER use numbers like "two" or "four" in your descriptions. 
+- STRICT QUANTITY TRACKING (THE MATH RULE): You MUST count the exact number of identical items. If the inventory lists 4 identical items, but you only see 3 in Photo 2, you MUST report 1 as "removed". If you see 5, you MUST report 1 as "added". NEVER assume "at least one is still there, so none were removed."
 
 YOUR TASK:
 There are only two possible changes: ADDED or REMOVED. There is no "moved".
@@ -59,11 +66,20 @@ If nothing changed, return an empty changes array.
 """
 
 INVENTORY_SECTION = """\
-CURRENT FRIDGE INVENTORY:
-The following items are already known to be in the fridge. If any of these
-are missing in Photo 2, you MUST use the EXACT description string shown below
-in your changes array — do not rephrase or redescribe them:
+CURRENT FRIDGE INVENTORY — there are exactly {count} item(s) in the fridge right now:
 {lines}
+
+IMPORTANT:
+- Do NOT report more removals than the total number of items listed above ({count} item(s)).
+- If any of these items are missing in Photo 2, use the EXACT description string shown \
+above in your changes array — do not rephrase or redescribe them.
+- If an item appears to still be present but looks slightly different (different angle, \
+lighting), do NOT report it as removed.
+"""
+
+EMPTY_INVENTORY_SECTION = """\
+CURRENT FRIDGE INVENTORY: empty — no items have been logged yet.
+Describe any removed items by appearance only.
 """
 
 
@@ -99,10 +115,12 @@ class Analyzer:
                 f'  - "{item["item_name"]}" (owned by {item["owner"]})'
                 for item in inventory
             )
-            inv_section = INVENTORY_SECTION.format(lines=lines)
+            inv_section = INVENTORY_SECTION.format(
+                count=len(inventory),
+                lines=lines,
+            )
         else:
-            inv_section = ("CURRENT FRIDGE INVENTORY: empty — "
-                           "describe all removed items by appearance.")
+            inv_section = EMPTY_INVENTORY_SECTION
         return BASE_PROMPT.format(inventory_section=inv_section)
 
     def _parse(self, text: str) -> dict:
@@ -132,11 +150,6 @@ class Analyzer:
 
     def analyze(self, before: np.ndarray, after: np.ndarray,
                 inventory: list[dict] = None) -> dict:
-        """
-        Compare before/after frames via Groq vision.
-        inventory: current DB inventory list — injected into prompt so Groq
-                   uses exact existing descriptions for removed items.
-        """
         client     = self._get_client()
         before_uri = self._encode(before)
         after_uri  = self._encode(after)
@@ -160,8 +173,10 @@ class Analyzer:
                     temperature=0.1,
                     max_tokens=1024,
                 )
-                print(f"[Analyzer] Response: {response.choices[0].message.content[:500]}")
-                return self._parse(response.choices[0].message.content)
+                result = self._parse(response.choices[0].message.content)
+                print(f"[Analyzer] Response: "
+                      f"{response.choices[0].message.content[:500]}")
+                return result
 
             except Exception as e:
                 err = str(e)
