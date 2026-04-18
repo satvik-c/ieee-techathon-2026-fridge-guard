@@ -23,6 +23,14 @@ _STOPWORDS = {
     "dark", "light", "bright",
 }
 
+# Container/shape type words. If a query and a stored item have DIFFERENT
+# container words, they cannot be the same item — skip that match entirely.
+_CONTAINER_WORDS = {
+    "box", "can", "bottle", "jar", "bag", "carton", "pouch",
+    "tube", "cup", "bowl", "tray", "jug", "block", "wrapper", "packet",
+    "cylindrical", "rectangular",
+}
+
 
 class DB:
     def __init__(self, db_path: str = "fridgeguard.db"):
@@ -90,13 +98,10 @@ class DB:
 
         Matching strategy:
           1. Exact match (case-insensitive) — always wins if found.
-          2. Structural word overlap — matches on shape/size/container
-             words only, deliberately excluding color words and filler.
-             This handles Groq describing the same object with different
-             colors due to lighting (e.g. "blue and yellow can" vs
-             "blue and green can" both match on "cylindrical" + "can").
-
-        Requires at least 2 structural word matches to avoid false positives.
+          2. Fuzzy match with container-type guard — if the query and a
+             stored item have different container words (e.g. "box" vs "can"),
+             that row is skipped entirely regardless of other word overlap.
+             Requires at least 2 word matches to avoid false positives.
         """
         # 1. Exact match
         row = self.conn.execute(
@@ -108,20 +113,28 @@ class DB:
         if row:
             return dict(row)
 
-        # 2. Structural fuzzy match (colors and filler excluded)
+        # 2. Fuzzy match with container-type guard
         rows = self.conn.execute(
             "SELECT * FROM inventory ORDER BY added_at DESC"
         ).fetchall()
         if not rows:
             return None
 
-        query_words = set(item_name.lower().split()) - _STOPWORDS
-        best_row    = None
-        best_score  = 0
+        query_words     = set(item_name.lower().split()) - _STOPWORDS
+        query_container = query_words & _CONTAINER_WORDS
+        best_row        = None
+        best_score      = 0
 
         for row in rows:
-            stored_words = set(row["item_name"].lower().split()) - _STOPWORDS
-            overlap      = len(query_words & stored_words)
+            stored_words     = set(row["item_name"].lower().split()) - _STOPWORDS
+            stored_container = stored_words & _CONTAINER_WORDS
+
+            # If both have container words and they don't overlap → wrong item
+            # type entirely, skip regardless of other word overlap
+            if query_container and stored_container and not (query_container & stored_container):
+                continue
+
+            overlap = len(query_words & stored_words)
             if overlap > best_score and overlap >= 2:
                 best_score = overlap
                 best_row   = row

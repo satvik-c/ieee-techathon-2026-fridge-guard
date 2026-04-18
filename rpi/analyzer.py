@@ -9,6 +9,7 @@ hallucinate duplicates.
 import base64
 import io
 import json
+import re
 import time
 
 import numpy as np
@@ -23,12 +24,21 @@ Photo 1 is BEFORE. Photo 2 is AFTER.
 
 CONTEXT:
 - Blue LED lighting makes both photos look dark and blue-tinted. This is normal — do not treat it as a difference.
-- There is a bright light at the back of the fridge. Objects near it may look washed out but are still real solid objects.
+- There is a bright light at the back of the fridge. Objects near it may look 
+  washed out but are still real solid objects. However, if an area that 
+  previously had an object is now just empty shelf or wall, that object is REMOVED.
 - The camera is wide-angle. Objects at the edges and corners of the frame are real — do not ignore them.
 - If one object is partially behind another, they are TWO separate objects. If both disappear, that is TWO removals.
 - BACKGROUND LIGHT does not move or change between photos — if something near it disappeared, it was a real object.
 - Objects may shift slightly in position between photos — this is irrelevant. Only care about objects that completely disappear or newly appear.
 - PARTIALLY OBSCURED OBJECTS: count every distinct object even if only partially visible.
+- Photo 1 and Photo 2 may have different brightness levels due to door position 
+  during capture. Brightness difference is NOT a reason to assume an item is 
+  still present. If an item occupied a specific region in Photo 1 and that 
+  region is clearly empty in Photo 2, report it as REMOVED even if Photo 2 
+  is darker overall.
+- A darker Photo 2 does not mean items are hidden. Empty space looks empty 
+  regardless of brightness.
 
 CRITICAL RULES FOR EDGE CASES (OBJECT PERMANENCE & STRICT MATH):
 - CUTOFFS & OCCLUSIONS ARE EXPECTED: The internal space is extremely tight (roughly 28x40x38 cm). Because the camera is wide-angle and close to the items, objects WILL frequently be cut in half by the edge of the frame or tightly packed together.
@@ -135,18 +145,99 @@ class Analyzer:
         start = text.find("{")
         end   = text.rfind("}")
         if start != -1 and end != -1 and end > start:
-            text = text[start:end + 1]
+            clean = text[start:end + 1]
+        else:
+            clean = text[start:] if start != -1 else text
 
+        # Try clean parse first
         try:
-            result = json.loads(text)
+            result = json.loads(clean)
             result.setdefault("before_contents", [])
             result.setdefault("after_contents",  [])
             result.setdefault("changes", [])
+
+            # Recompute changes from content lists — more reliable than
+            # trusting the model's own changes array
+            before = result["before_contents"]
+            after  = result["after_contents"]
+            if before or after:
+                result["changes"] = self._diff_contents(before, after)
+
             return result
-        except json.JSONDecodeError as e:
-            print(f"[Analyzer] JSON parse failed: {e}")
-            print(f"[Analyzer] Raw: {text[:300]}")
-            raise
+
+        except json.JSONDecodeError:
+            pass
+
+        # JSON was truncated — extract content arrays directly with regex
+        print(f"[Analyzer] Truncated JSON — extracting content lists directly")
+
+        def extract_array(key: str) -> list[str]:
+            pattern = rf'"{key}"\s*:\s*\['
+            m = re.search(pattern, text)
+            if not m:
+                return []
+            array_start = m.end() - 1
+            items = []
+            for match in re.finditer(r'"([^"]+)"', text[array_start:]):
+                val = match.group(1)
+                # Stop if we've hit a key name rather than a value
+                if val in ("before_contents", "after_contents", "changes",
+                           "item", "action", "added", "removed"):
+                    break
+                items.append(val)
+            return items
+
+        before = extract_array("before_contents")
+        after  = extract_array("after_contents")
+        print(f"[Analyzer] Recovered — before: {len(before)}, after: {len(after)}")
+
+        return {
+            "before_contents": before,
+            "after_contents":  after,
+            "changes":         self._diff_contents(before, after),
+        }
+
+    def _diff_contents(self, before: list[str], after: list[str]) -> list[dict]:
+        """
+        Derive the changes array by diffing before/after content lists.
+        Uses a counter-based approach so duplicate items are handled correctly.
+        This replaces reliance on the model's own changes array, which is
+        frequently wrong or truncated even when the content lists are correct.
+        """
+        from collections import Counter
+
+        def normalize(desc: str) -> str:
+            # Strip stopwords so minor description variations still match
+            stopwords = {
+                "and", "or", "a", "an", "the", "with", "of", "in", "on",
+                "small", "large", "big", "tall", "short", "dark", "light",
+                "bright", "clear", "red", "orange", "yellow", "green", "blue",
+                "purple", "pink", "black", "white", "grey", "gray", "silver",
+                "gold", "brown", "transparent",
+            }
+            words = [w for w in desc.lower().split() if w not in stopwords]
+            return " ".join(sorted(words))
+
+        before_counts = Counter(normalize(d) for d in before)
+        after_counts  = Counter(normalize(d) for d in after)
+
+        changes = []
+
+        # Items that decreased in count -> removed
+        for norm, count in before_counts.items():
+            delta = count - after_counts.get(norm, 0)
+            orig = next((d for d in before if normalize(d) == norm), norm)
+            for _ in range(delta):
+                changes.append({"item": orig, "action": "removed"})
+
+        # Items that increased in count -> added
+        for norm, count in after_counts.items():
+            delta = count - before_counts.get(norm, 0)
+            orig = next((d for d in after if normalize(d) == norm), norm)
+            for _ in range(delta):
+                changes.append({"item": orig, "action": "added"})
+
+        return changes
 
     def analyze(self, before: np.ndarray, after: np.ndarray,
                 inventory: list[dict] = None) -> dict:
@@ -164,14 +255,14 @@ class Analyzer:
                         {
                             "role": "user",
                             "content": [
-                                {"type": "text",      "text": prompt},
+                                {"type": "text", "text": prompt},
                                 {"type": "image_url", "image_url": {"url": before_uri}},
                                 {"type": "image_url", "image_url": {"url": after_uri}},
                             ],
                         }
                     ],
                     temperature=0.1,
-                    max_tokens=1024,
+                    max_tokens=4096,
                 )
                 result = self._parse(response.choices[0].message.content)
                 print(f"[Analyzer] Response: "

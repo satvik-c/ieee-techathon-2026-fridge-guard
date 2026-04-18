@@ -60,11 +60,11 @@ class SerialReader:
             self.ble_queue.put_nowait(BLEScan(timestamp=ts, devices=devices))
 
             if devices:
-                # Show the first detected roommate's UUID on the OLED
+                strongest = max(devices, key=lambda d: d.rssi)
                 self.display.update_status(
-                    temp_f=None, # Keep existing temp if your update_status allows
-                    humidity=None, 
-                    roommate=devices[0].uuid
+                    temp_f=None,
+                    humidity=None,
+                    roommate=strongest.uuid
                 )
             
             return "ble"

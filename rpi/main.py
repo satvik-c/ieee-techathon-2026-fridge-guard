@@ -243,8 +243,8 @@ async def main():
         while True:
             scan = await serial_reader.ble_queue.get()
             ble_window.record(scan)
-            if ble_window.collecting:
-                ble_resolver.resolve(scan)
+            #if ble_window.collecting:
+            ble_resolver.resolve(scan)
 
     async def consume_temp():
         while True:
