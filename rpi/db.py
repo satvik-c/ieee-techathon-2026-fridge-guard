@@ -195,12 +195,19 @@ class DB:
     # ── Temperature logging ──────────────────────────────────
 
     def log_temp(self, temp_f: float, humidity: float):
-        self.conn.execute(
-            "INSERT OR REPLACE INTO temp_log "
-            "(timestamp, temp_f, humidity) VALUES (?, ?, ?)",
-            (datetime.now().isoformat(), temp_f, humidity),
-        )
-        self.conn.commit()
+        try:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO temp_log "
+                "(timestamp, temp_f, humidity) VALUES (?, ?, ?)",
+                (datetime.now().isoformat(), temp_f, humidity),
+            )
+            self.conn.commit()
+        except sqlite3.OperationalError as e:
+            print(f"[DB] log_temp error: {e} — resetting connection")
+            try:
+                self.conn.rollback()
+            except:
+                pass
 
     def get_recent_temps(self, minutes: int = 10) -> list[dict]:
         cutoff = (datetime.now() - timedelta(minutes=minutes)).isoformat()

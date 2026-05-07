@@ -249,11 +249,14 @@ async def main():
     async def consume_temp():
         while True:
             reading = await serial_reader.temp_queue.get()
-            db.log_temp(temp_f=reading.temp_f, humidity=reading.humidity)
-            temp_history.append((time.time(), reading.temp_f))
-            notifier.status(
-                f"Temp: {reading.temp_f:.1f} °F, {reading.humidity:.0f}% humidity"
-            )
+            try:
+                db.log_temp(temp_f=reading.temp_f, humidity=reading.humidity)
+                temp_history.append((time.time(), reading.temp_f))
+                notifier.status(
+                    f"Temp: {reading.temp_f:.1f} °F, {reading.humidity:.0f}% humidity"
+                )
+            except Exception as e:
+                print(f"[Temp] Error: {e} — continuing")
 
     async def watchdog():
         """
